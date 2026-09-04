@@ -9,18 +9,23 @@ import initWasm from 'https://cdn.jsdelivr.net/npm/@ifc-lite/wasm/+esm';
 // current numbers and keep parser/geometry/renderer/wasm in step.
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@ifc-lite/wasm/pkg/ifc-lite_bg.wasm';
 
-const canvas = document.getElementById('viewer-canvas');
+let canvas = document.getElementById('viewer-canvas');
 const overlay = document.getElementById('overlay');
 const fileNameEl = document.getElementById('file-name');
 const statsEl = document.getElementById('stats');
 const btnFitView = document.getElementById('btn-fit-view');
 
 let renderer = null;
-let geometryProcessor = null;
-let engineReadyPromise = null;
+let wasmInitPromise = null;
 let lastGeometryResult = null;
 let currentAttachmentId = null;
 let hasModelLoaded = false;
+let currentLoadId = 0;
+
+let isDragging = false;
+let isPanning = false;
+let lastX = 0;
+let lastY = 0;
 
 // ---------- Small UI helpers ----------
 
@@ -59,30 +64,35 @@ function setStats({ fileName = '', schemaVersion = null, entityCount = null, loa
   btnFitView.disabled = !fileName;
 }
 
-// ---------- Model lifecycle management ----------
+// ---------- Canvas & Renderer Lifecycle Management ----------
+
+function resetCanvas() {
+  if (renderer) {
+    try {
+      if (typeof renderer.destroy === 'function') {
+        renderer.destroy();
+      }
+    } catch (err) {
+      console.warn('Error destroying renderer:', err);
+    }
+    renderer = null;
+  }
+
+  // Replacing the canvas DOM element guarantees all WebGPU buffers,
+  // lingering GPU textures, and previous models are completely wiped.
+  const oldCanvas = canvas;
+  const newCanvas = oldCanvas.cloneNode(false);
+  oldCanvas.replaceWith(newCanvas);
+  canvas = newCanvas;
+  bindCanvasControls();
+}
 
 function unloadModel() {
+  currentLoadId++; // Invalidate any asynchronous downloads or parsing in-flight
   hasModelLoaded = false;
   lastGeometryResult = null;
   setStats();
-
-  if (renderer) {
-    if (renderer.scene && typeof renderer.scene.clear === 'function') {
-      try {
-        renderer.scene.clear();
-      } catch (err) {
-        console.warn('Could not clear renderer scene:', err);
-      }
-    }
-    if (typeof renderer.setModelBounds === 'function') {
-      renderer.setModelBounds(null);
-    }
-    try {
-      renderer.render();
-    } catch (err) {
-      // Ignored if frame is empty
-    }
-  }
+  resetCanvas();
 }
 
 function showEmptyState(message) {
@@ -119,14 +129,12 @@ function debounce(fn, ms) {
 }
 
 async function handleResize() {
-  if (!renderer) return;
+  if (!renderer || !hasModelLoaded) return;
   sizeCanvasToContainer();
   if (typeof renderer.resize === 'function') {
-    // Feature-detected in case a future IFClite release adds a cheap resize path.
     renderer.resize(canvas.width, canvas.height);
     renderer.render();
   } else if (lastGeometryResult) {
-    // Fallback: re-init against the new canvas size and reload the last geometry.
     await renderer.init();
     renderer.loadGeometry(lastGeometryResult);
     renderer.fitToView();
@@ -134,42 +142,11 @@ async function handleResize() {
   }
 }
 
-// ---------- IFClite engine (created once, reused across loads) ----------
+// ---------- Camera & Input Controls ----------
 
-async function ensureEngine() {
-  if (!engineReadyPromise) {
-    engineReadyPromise = (async () => {
-      if (!navigator.gpu) {
-        throw new Error(
-          'This browser does not support WebGPU, which IFClite needs to render 3D models. ' +
-          'Try a recent Chrome, Edge, or Firefox (see ifclite.dev for the full list).'
-        );
-      }
-      await initWasm({ module_or_path: WASM_URL });
-      geometryProcessor = new GeometryProcessor();
-      await geometryProcessor.init();
-
-      sizeCanvasToContainer();
-      renderer = new Renderer(canvas);
-      await renderer.init();
-
-      setupCameraControls(canvas, renderer);
-      window.addEventListener('resize', debounce(handleResize, 200));
-    })();
-  }
-  return engineReadyPromise;
-}
-
-// Manual orbit / pan / zoom controls, following IFClite's documented
-// Renderer.getCamera() pattern (camera.orbit / .pan / .zoom).
-function setupCameraControls(canvas, renderer) {
-  const camera = renderer.getCamera();
-  let isDragging = false;
-  let isPanning = false;
-  let lastX = 0;
-  let lastY = 0;
-
+function bindCanvasControls() {
   canvas.addEventListener('mousedown', (e) => {
+    if (!renderer || !hasModelLoaded) return;
     isDragging = true;
     isPanning = e.button === 1 || e.button === 2 || e.shiftKey;
     lastX = e.clientX;
@@ -177,28 +154,11 @@ function setupCameraControls(canvas, renderer) {
     canvas.style.cursor = isPanning ? 'move' : 'grabbing';
   });
 
-  window.addEventListener('mousemove', (e) => {
-    if (!isDragging) return;
-    const deltaX = e.clientX - lastX;
-    const deltaY = e.clientY - lastY;
-    lastX = e.clientX;
-    lastY = e.clientY;
-    if (isPanning) {
-      camera.pan(deltaX, deltaY);
-    } else {
-      camera.orbit(deltaX, deltaY);
-    }
-    renderer.render();
-  });
-
-  window.addEventListener('mouseup', () => {
-    isDragging = false;
-    isPanning = false;
-    canvas.style.cursor = 'grab';
-  });
-
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
+    if (!renderer || !hasModelLoaded) return;
+    const camera = renderer.getCamera();
+    if (!camera) return;
     const rect = canvas.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
@@ -210,40 +170,86 @@ function setupCameraControls(canvas, renderer) {
   canvas.style.cursor = 'grab';
 }
 
+window.addEventListener('mousemove', (e) => {
+  if (!isDragging || !renderer || !hasModelLoaded) return;
+  const camera = renderer.getCamera();
+  if (!camera) return;
+  const deltaX = e.clientX - lastX;
+  const deltaY = e.clientY - lastY;
+  lastX = e.clientX;
+  lastY = e.clientY;
+  if (isPanning) {
+    camera.pan(deltaX, deltaY);
+  } else {
+    camera.orbit(deltaX, deltaY);
+  }
+  renderer.render();
+});
+
+window.addEventListener('mouseup', () => {
+  isDragging = false;
+  isPanning = false;
+  if (canvas) canvas.style.cursor = 'grab';
+});
+
+window.addEventListener('resize', debounce(handleResize, 200));
+
+// ---------- WASM Engine Initialization ----------
+
+function ensureWasm() {
+  if (!wasmInitPromise) {
+    wasmInitPromise = initWasm({ module_or_path: WASM_URL });
+  }
+  return wasmInitPromise;
+}
+
 // ---------- Loading pipeline ----------
 
-async function loadIfcBuffer(buffer, label) {
+async function loadIfcBuffer(buffer, label, loadId) {
   const startedAt = performance.now();
   try {
-    setOverlay('loading', { title: 'Loading model', message: 'Starting up the viewer\u2026' });
-    await ensureEngine();
+    if (!navigator.gpu) {
+      throw new Error(
+        'This browser does not support WebGPU, which IFClite needs to render 3D models. ' +
+        'Try a recent Chrome, Edge, or Firefox (see ifclite.dev for the full list).'
+      );
+    }
 
-    // Clear any previous geometry from the renderer before processing new model
-    if (renderer && renderer.scene && typeof renderer.scene.clear === 'function') {
-      try {
-        renderer.scene.clear();
-      } catch (e) {
-        console.warn('Could not clear scene prior to loading:', e);
-      }
-    }
-    if (renderer && typeof renderer.setModelBounds === 'function') {
-      renderer.setModelBounds(null);
-    }
+    setOverlay('loading', { title: 'Loading model', message: 'Starting up 3D engine\u2026' });
+    await ensureWasm();
+    if (loadId !== currentLoadId) return;
 
     setOverlay('loading', { title: 'Loading model', message: 'Parsing IFC data\u2026' });
     const parser = new IfcParser();
     const store = await parser.parseColumnar(buffer);
+    if (loadId !== currentLoadId) return;
 
     setOverlay('loading', { title: 'Loading model', message: 'Processing geometry\u2026' });
+    const geometryProcessor = new GeometryProcessor();
+    await geometryProcessor.init();
+    if (loadId !== currentLoadId) return;
+
     const geometryResult = await geometryProcessor.process(new Uint8Array(buffer));
-    lastGeometryResult = geometryResult;
+    if (loadId !== currentLoadId) return;
 
+    // Reset canvas and instantiate a fresh Renderer to guarantee no old model aggregation
+    resetCanvas();
     sizeCanvasToContainer();
-    renderer.loadGeometry(geometryResult);
-    renderer.fitToView();
-    renderer.render();
+    const newRenderer = new Renderer(canvas);
+    await newRenderer.init();
+    if (loadId !== currentLoadId) {
+      try { newRenderer.destroy(); } catch (e) {}
+      return;
+    }
 
+    newRenderer.loadGeometry(geometryResult);
+    newRenderer.fitToView();
+    newRenderer.render();
+
+    renderer = newRenderer;
+    lastGeometryResult = geometryResult;
     hasModelLoaded = true;
+
     setOverlay(null);
     setStats({
       fileName: label,
@@ -252,21 +258,27 @@ async function loadIfcBuffer(buffer, label) {
       loadMs: performance.now() - startedAt,
     });
   } catch (err) {
-    unloadModel();
-    showErrorState('Could not load this model', err);
+    if (loadId === currentLoadId) {
+      unloadModel();
+      showErrorState('Could not load this model', err);
+    }
   }
 }
 
 async function loadFromGristAttachment(attachmentId) {
+  const loadId = ++currentLoadId;
   try {
     setOverlay('loading', { title: 'Loading model', message: 'Fetching attachment from Grist\u2026' });
     const tokenInfo = await grist.docApi.getAccessToken({ readOnly: true });
+    if (loadId !== currentLoadId) return;
 
     let displayName = `Attachment #${attachmentId}`;
     try {
       const metaRes = await fetch(`${tokenInfo.baseUrl}/attachments/${attachmentId}?auth=${tokenInfo.token}`);
+      if (loadId !== currentLoadId) return;
       if (metaRes.ok) {
         const meta = await metaRes.json();
+        if (loadId !== currentLoadId) return;
         if (meta && meta.fileName) displayName = meta.fileName;
       }
     } catch (metaErr) {
@@ -274,13 +286,18 @@ async function loadFromGristAttachment(attachmentId) {
     }
 
     const fileRes = await fetch(`${tokenInfo.baseUrl}/attachments/${attachmentId}/download?auth=${tokenInfo.token}`);
+    if (loadId !== currentLoadId) return;
     if (!fileRes.ok) {
       throw new Error(`Grist returned ${fileRes.status} while downloading the attachment.`);
     }
     const buffer = await fileRes.arrayBuffer();
-    await loadIfcBuffer(buffer, displayName);
+    if (loadId !== currentLoadId) return;
+
+    await loadIfcBuffer(buffer, displayName, loadId);
   } catch (err) {
-    showErrorState('Could not fetch the attachment', err);
+    if (loadId === currentLoadId) {
+      showErrorState('Could not fetch the attachment', err);
+    }
   }
 }
 
@@ -296,6 +313,8 @@ btnFitView.addEventListener('click', () => {
 // ---------- Grist wiring ----------
 
 function initGrist() {
+  bindCanvasControls();
+
   if (!window.grist) {
     showEmptyState('Not running inside Grist. This widget displays IFC models from a Grist table Attachments column.');
     return;
@@ -332,7 +351,7 @@ function initGrist() {
     }
     if (attachmentId === currentAttachmentId) return;
 
-    // Unload the previous model immediately before fetching and loading the newly selected model
+    // Immediately unload the previous model and clear the canvas
     unloadModel();
     currentAttachmentId = attachmentId;
     loadFromGristAttachment(attachmentId);
