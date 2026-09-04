@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>IFC Viewer</title>
+
+<!--
+  Grist custom widget: IFC model viewer, powered by IFClite (ifclite.dev).
+
+  What this does
+  --------------
+  - Reads the row currently selected in Grist.
+  - Downloads the .ifc file from a mapped "Attachments" column.
+  - Parses + tessellates it client-side with IFClite (WASM) and renders it
+    with IFClite's WebGPU renderer.
+  - Also works stand-alone (outside Grist) via the "Open file" button or by
+    dragging an .ifc file onto the window - handy for testing the widget
+    on its own before wiring it into a document.
+
+  Requirements
+  ------------
+  - A browser with WebGPU: Chrome/Edge 113+, Firefox 127+, Safari 18+.
+  - A Grist table with an Attachments-type column holding .ifc files.
+
+  See README.md next to this file for hosting + install steps.
+-->
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <div id="app">
+    <div id="toolbar">
+      <div class="brand" title="Rendered with IFClite (ifclite.dev)">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M8 1L14.5 4.6V11.4L8 15L1.5 11.4V4.6L8 1Z" stroke="#4da3ff" stroke-width="1.1" stroke-linejoin="round"/>
+          <path d="M1.5 4.6L8 8.2M8 8.2L14.5 4.6M8 8.2V15" stroke="#4da3ff" stroke-width="1.1" stroke-linejoin="round"/>
+        </svg>
+        <span>IFC Viewer</span>
+      </div>
+
+      <div id="model-info">
+        <span id="file-name"></span>
+        <span id="stats"></span>
+      </div>
+
+      <button id="btn-open-file" class="toolbar-btn" type="button">Open file&hellip;</button>
+      <button id="btn-fit-view" class="toolbar-btn" type="button" disabled>Fit view</button>
+    </div>
+
+    <div id="viewport-wrap">
+      <canvas id="viewer-canvas"></canvas>
+      <div id="overlay" class="overlay" hidden></div>
+    </div>
+  </div>
+
+  <input id="file-input" type="file" accept=".ifc" hidden />
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
