@@ -13,8 +13,6 @@ const canvas = document.getElementById('viewer-canvas');
 const overlay = document.getElementById('overlay');
 const fileNameEl = document.getElementById('file-name');
 const statsEl = document.getElementById('stats');
-const fileInput = document.getElementById('file-input');
-const btnOpenFile = document.getElementById('btn-open-file');
 const btnFitView = document.getElementById('btn-fit-view');
 
 let renderer = null;
@@ -32,7 +30,7 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-function setOverlay(kind, { title = '', message = '', showDropHint = false } = {}) {
+function setOverlay(kind, { title = '', message = '' } = {}) {
   if (kind === null) {
     overlay.hidden = true;
     overlay.className = 'overlay';
@@ -47,7 +45,6 @@ function setOverlay(kind, { title = '', message = '', showDropHint = false } = {
       ${kind === 'error' ? '<div class="overlay-icon" aria-hidden="true">&#9888;</div>' : ''}
       ${title ? `<div class="overlay-title">${escapeHtml(title)}</div>` : ''}
       ${message ? `<div class="overlay-message">${escapeHtml(message)}</div>` : ''}
-      ${showDropHint ? '<div class="overlay-hint">Drop an .ifc file anywhere on this window to preview it</div>' : ''}
     </div>
   `;
 }
@@ -62,15 +59,41 @@ function setStats({ fileName = '', schemaVersion = null, entityCount = null, loa
   btnFitView.disabled = !fileName;
 }
 
-function showEmptyState(message) {
+// ---------- Model lifecycle management ----------
+
+function unloadModel() {
   hasModelLoaded = false;
-  currentAttachmentId = null;
+  lastGeometryResult = null;
   setStats();
-  setOverlay('empty', { title: 'No model loaded', message, showDropHint: true });
+
+  if (renderer) {
+    if (renderer.scene && typeof renderer.scene.clear === 'function') {
+      try {
+        renderer.scene.clear();
+      } catch (err) {
+        console.warn('Could not clear renderer scene:', err);
+      }
+    }
+    if (typeof renderer.setModelBounds === 'function') {
+      renderer.setModelBounds(null);
+    }
+    try {
+      renderer.render();
+    } catch (err) {
+      // Ignored if frame is empty
+    }
+  }
+}
+
+function showEmptyState(message) {
+  unloadModel();
+  currentAttachmentId = null;
+  setOverlay('empty', { title: 'No model loaded', message });
 }
 
 function showErrorState(title, err) {
-  hasModelLoaded = false;
+  unloadModel();
+  currentAttachmentId = null;
   console.error(title, err);
   setOverlay('error', {
     title,
@@ -99,13 +122,11 @@ async function handleResize() {
   if (!renderer) return;
   sizeCanvasToContainer();
   if (typeof renderer.resize === 'function') {
-    // Not documented as of this writing, but feature-detected in case a
-    // future IFClite release adds a cheap resize path.
+    // Feature-detected in case a future IFClite release adds a cheap resize path.
     renderer.resize(canvas.width, canvas.height);
     renderer.render();
   } else if (lastGeometryResult) {
-    // Fallback: re-init against the new canvas size and reload the last
-    // geometry. Debounced below so a window drag doesn't thrash this.
+    // Fallback: re-init against the new canvas size and reload the last geometry.
     await renderer.init();
     renderer.loadGeometry(lastGeometryResult);
     renderer.fitToView();
@@ -197,6 +218,18 @@ async function loadIfcBuffer(buffer, label) {
     setOverlay('loading', { title: 'Loading model', message: 'Starting up the viewer\u2026' });
     await ensureEngine();
 
+    // Clear any previous geometry from the renderer before processing new model
+    if (renderer && renderer.scene && typeof renderer.scene.clear === 'function') {
+      try {
+        renderer.scene.clear();
+      } catch (e) {
+        console.warn('Could not clear scene prior to loading:', e);
+      }
+    }
+    if (renderer && typeof renderer.setModelBounds === 'function') {
+      renderer.setModelBounds(null);
+    }
+
     setOverlay('loading', { title: 'Loading model', message: 'Parsing IFC data\u2026' });
     const parser = new IfcParser();
     const store = await parser.parseColumnar(buffer);
@@ -219,8 +252,7 @@ async function loadIfcBuffer(buffer, label) {
       loadMs: performance.now() - startedAt,
     });
   } catch (err) {
-    hasModelLoaded = false;
-    setStats();
+    unloadModel();
     showErrorState('Could not load this model', err);
   }
 }
@@ -252,52 +284,20 @@ async function loadFromGristAttachment(attachmentId) {
   }
 }
 
-function openLocalFile(file) {
-  if (!file) return;
-  currentAttachmentId = null; // a manually opened file overrides the mapped attachment
-  const reader = new FileReader();
-  reader.onload = () => loadIfcBuffer(reader.result, file.name);
-  reader.onerror = () => showErrorState('Could not read file', reader.error);
-  reader.readAsArrayBuffer(file);
-}
+// ---------- Toolbar wiring ----------
 
-// ---------- Toolbar + drag/drop wiring ----------
-
-btnOpenFile.addEventListener('click', () => fileInput.click());
 btnFitView.addEventListener('click', () => {
   if (renderer && hasModelLoaded) {
     renderer.fitToView();
     renderer.render();
   }
 });
-fileInput.addEventListener('change', () => {
-  openLocalFile(fileInput.files && fileInput.files[0]);
-  fileInput.value = '';
-});
-
-['dragenter', 'dragover'].forEach((evt) =>
-  document.body.addEventListener(evt, (e) => {
-    e.preventDefault();
-    document.body.classList.add('drag-active');
-  })
-);
-['dragleave', 'drop'].forEach((evt) =>
-  document.body.addEventListener(evt, (e) => {
-    e.preventDefault();
-    document.body.classList.remove('drag-active');
-  })
-);
-document.body.addEventListener('drop', (e) => {
-  openLocalFile(e.dataTransfer.files && e.dataTransfer.files[0]);
-});
 
 // ---------- Grist wiring ----------
 
 function initGrist() {
   if (!window.grist) {
-    // Not embedded in Grist (e.g. previewing this file directly) - the
-    // local "Open file" / drag-and-drop path still works on its own.
-    showEmptyState('Not running inside Grist \u2014 use \u201cOpen file\u201d or drop an .ifc file here to preview it.');
+    showEmptyState('Not running inside Grist. This widget displays IFC models from a Grist table Attachments column.');
     return;
   }
 
@@ -331,6 +331,9 @@ function initGrist() {
       return;
     }
     if (attachmentId === currentAttachmentId) return;
+
+    // Unload the previous model immediately before fetching and loading the newly selected model
+    unloadModel();
     currentAttachmentId = attachmentId;
     loadFromGristAttachment(attachmentId);
   });

@@ -174,11 +174,6 @@ body {
   background: rgba(33, 37, 43, 0.5);
 }
 
-body.drag-active .overlay--empty .overlay-card {
-  border-color: var(--accent);
-  background: rgba(77, 163, 255, 0.08);
-}
-
 .overlay-title {
   font-size: 14px;
   font-weight: 600;

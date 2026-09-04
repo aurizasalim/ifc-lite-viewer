@@ -14,9 +14,6 @@
   - Downloads the .ifc file from a mapped "Attachments" column.
   - Parses + tessellates it client-side with IFClite (WASM) and renders it
     with IFClite's WebGPU renderer.
-  - Also works stand-alone (outside Grist) via the "Open file" button or by
-    dragging an .ifc file onto the window - handy for testing the widget
-    on its own before wiring it into a document.
 
   Requirements
   ------------
@@ -45,7 +42,6 @@
         <span id="stats"></span>
       </div>
 
-      <button id="btn-open-file" class="toolbar-btn" type="button">Open file&hellip;</button>
       <button id="btn-fit-view" class="toolbar-btn" type="button" disabled>Fit view</button>
     </div>
 
@@ -54,8 +50,6 @@
       <div id="overlay" class="overlay" hidden></div>
     </div>
   </div>
-
-  <input id="file-input" type="file" accept=".ifc" hidden />
 
 <script type="module" src="app.js"></script>
 </body>

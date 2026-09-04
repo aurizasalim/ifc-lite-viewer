@@ -42,9 +42,6 @@ Select a row with a model attached, and it should load automatically.
 
 - **Drag** to orbit, **scroll** to zoom, **shift-drag** (or middle/right
   mouse drag) to pan, **Fit view** to re-frame the model.
-- **Open file…** lets you preview any local `.ifc` file, regardless of
-  what's mapped in Grist — handy for testing the widget on its own, or
-  for a quick look at a file before attaching it to a row.
 - If a row's Attachments cell holds more than one file, only the first
   one is shown.
 
@@ -88,6 +85,3 @@ Select a row with a model attached, and it should load automatically.
    WebGPU on a `<canvas>`.
 4. Mouse events drive the camera through IFClite's `camera.orbit` /
    `.pan` / `.zoom` methods.
-
-Dropping a local file, or clicking **Open file…**, runs the same
-`loadIfcBuffer()` pipeline, just skipping the Grist download step.
