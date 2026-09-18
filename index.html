@@ -1,56 +1,96 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>IFC Viewer</title>
-
-<!--
-  Grist custom widget: IFC model viewer, powered by IFClite (ifclite.dev).
-
-  What this does
-  --------------
-  - Reads the row currently selected in Grist.
-  - Downloads the .ifc file from a mapped "Attachments" column.
-  - Parses + tessellates it client-side with IFClite (WASM) and renders it
-    with IFClite's WebGPU renderer.
-
-  Requirements
-  ------------
-  - A browser with WebGPU: Chrome/Edge 113+, Firefox 127+, Safari 18+.
-  - A Grist table with an Attachments-type column holding .ifc files.
-
-  See README.md next to this file for hosting + install steps.
--->
-<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
-<link rel="stylesheet" href="styles.css" />
+  <meta charset="utf-8">
+  <title>Grist IFC-Lite Viewer PoC</title>
+  <!-- 1. Import Grist Plugin API -->
+  <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+  <style>
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; font-family: sans-serif; }
+    #canvas-container { width: 100%; height: 100%; position: relative; }
+    canvas { width: 100%; height: 100%; display: block; }
+    #status { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.75); color: #fff; padding: 6px 12px; border-radius: 4px; font-size: 12px; z-index: 10; }
+  </style>
 </head>
 <body>
-
-  <div id="app">
-    <div id="toolbar">
-      <div class="brand" title="Rendered with IFClite (ifclite.dev)">
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <path d="M8 1L14.5 4.6V11.4L8 15L1.5 11.4V4.6L8 1Z" stroke="#4da3ff" stroke-width="1.1" stroke-linejoin="round"/>
-          <path d="M1.5 4.6L8 8.2M8 8.2L14.5 4.6M8 8.2V15" stroke="#4da3ff" stroke-width="1.1" stroke-linejoin="round"/>
-        </svg>
-        <span>IFC Viewer</span>
-      </div>
-
-      <div id="model-info">
-        <span id="file-name"></span>
-        <span id="stats"></span>
-      </div>
-
-      <button id="btn-fit-view" class="toolbar-btn" type="button" disabled>Fit view</button>
-    </div>
-
-    <div id="viewport-wrap">
-      <canvas id="viewer-canvas"></canvas>
-      <div id="overlay" class="overlay" hidden></div>
-    </div>
+  <div id="status">Waiting for Grist selection...</div>
+  <div id="canvas-container">
+    <canvas id="viewer-canvas"></canvas>
   </div>
 
-<script type="module" src="app.js"></script>
+  <script type="module">
+    // 2. Import IFC-Lite modules
+    import { IfcParser } from 'https://cdn.jsdelivr.net/npm/@ifc-lite/parser@0.33.0/+esm';
+    import { GeometryProcessor } from 'https://cdn.jsdelivr.net/npm/@ifc-lite/geometry@0.33.0/+esm';
+    import { Renderer } from 'https://cdn.jsdelivr.net/npm/@ifc-lite/renderer@0.33.0/+esm';
+
+    let currentUrl = null;
+    let renderer = null;
+
+    // Initialize 3D Renderer (WebGPU)
+    async function initRenderer() {
+      const canvas = document.getElementById('viewer-canvas');
+      renderer = new Renderer(canvas);
+      await renderer.init();
+    }
+
+    // Load and render IFC File
+    async function loadIfc(url) {
+      const statusEl = document.getElementById('status');
+      statusEl.textContent = 'Fetching IFC file...';
+      
+      try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+        const buffer = await response.arrayBuffer();
+
+        statusEl.textContent = 'Parsing IFC geometry...';
+        const geometry = new GeometryProcessor();
+        await geometry.init();
+
+        const parser = new IfcParser();
+        const store = await parser.parseColumnar(buffer);
+
+        const meshes = [];
+        for await (const event of geometry.processAdaptive(new Uint8Array(buffer))) {
+          if (event.type === 'batch') meshes.push(...event.meshes);
+        }
+
+        renderer.loadGeometry(meshes);
+        renderer.fitToView();
+        renderer.render();
+
+        statusEl.textContent = `Model loaded successfully (${store.entityCount} entities)`;
+      } catch (err) {
+        statusEl.textContent = `Error: ${err.message}`;
+        console.error(err);
+      }
+    }
+
+    // 3. Register Grist Custom Widget configuration
+    grist.ready({
+      requiredAccess: 'read table',
+      columns: [
+        { name: 'IFC_URL', title: 'IFC File URL', type: 'Text', optional: false }
+      ]
+    });
+
+    initRenderer().catch(err => {
+      document.getElementById('status').textContent = 'WebGPU initialization failed. Ensure browser supports WebGPU.';
+    });
+
+    // 4. React to row selection changes in Grist
+    grist.onRecord((record) => {
+      const mapped = grist.mapColumnNames(record);
+      if (mapped && mapped.IFC_URL) {
+        if (mapped.IFC_URL !== currentUrl) {
+          currentUrl = mapped.IFC_URL;
+          loadIfc(currentUrl);
+        }
+      } else {
+        document.getElementById('status').textContent = 'Please map the "IFC File URL" column in Grist Widget options.';
+      }
+    });
+  </script>
 </body>
 </html>
